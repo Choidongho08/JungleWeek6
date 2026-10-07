@@ -1,11 +1,17 @@
 /*
- * mm-explicit.c 명시적 가용 리스트
+ * mm-naive.c - 가장 빠르지만 메모리 효율은 가장 낮은 malloc 구현.
  *
- * 헤드와 푸터가 존재함.
- * payload내에 prev와 next의 주소가 들어있음.
+ * 이 단순한 방식에서는 brk 포인터를 증가시켜 블록을 할당합니다.
+ * 블록은 사용자 데이터(payload)만으로 이루어지며, 헤더나 푸터가 없습니다.
+ * 블록을 병합하거나 재사용하지 않습니다. realloc은 mm_malloc과 mm_free를
+ * 직접 사용하여 구현합니다.
+ * 
+ * ->
  *
- * 학생 참고 사항: 이 헤더 주석을 여러분의 구현을 개괄적으로 설명하는
- * 주석으로 바꾸세요.
+ * 책 내용대로 헤더와 푸터를 사용하여 메모리 효율을 높인 방식.
+ *
+ * 학생 안내: 이 머리말을 자신의 구현 방식을 전반적으로 설명하는
+ * 주석으로 교체하세요.
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,60 +58,53 @@ team_t team = {
 #define FTRP(bp) ((char*)bp + GET_SIZE(HDRP(bp)) - ALIGNMENT)
 #define NEXT_BLKP(bp) ((char*)bp + GET_SIZE(((char*)bp - WSIZE)))
 #define PREV_BLKP(bp) ((char*)bp - GET_SIZE((char*)bp - ALIGNMENT))
-#define NEXT_(bp) *(void**)((char*)bp + ALIGNMENT)
-#define PREV_(bp) *(void**)bp
 
 static void* extend_heap(size_t words);
 static void* find_fit(size_t asize);
 static void place(void* bp, size_t asize);
 static void* coalesce(void* bp);
-static void remove_free_block(void* bp);
-static void push_free_block(void* bp);
 
 /*
  * mm_init - malloc 구현을 초기화합니다.
  */
-char* p; // 주소(+, *등)를 계산하기 위해 1바이트인 char 사용.
-char* next_fit_p;
-char* list;
+ char* p;
 int mm_init(void)
 {
-    p = mem_sbrk(4 * ALIGNMENT);
+    p = mem_sbrk(4*WSIZE);
     if(p == (void*)-1)
         return -1;
-    PUT(p, 0); // padding (4b)
-    PUT(p + WSIZE, PACK((3 * ALIGNMENT), 1)); // header (4b)
-    *(void**)(p + ALIGNMENT) = NULL; // prev
-    *(void**)(p + (2*ALIGNMENT)) = NULL; // next
-    PUT(p + ((2 * ALIGNMENT) + (2 * WSIZE)), PACK((3 * ALIGNMENT), 1)); // footer
-    PUT(p + ((2 * ALIGNMENT) + (3 * WSIZE)), PACK(0, 0));
-    p += (2 * WSIZE); // p => payload
-    list = NULL;
-    next_fit_p = list;
+
+    PUT(p, 0);
+    PUT(p + WSIZE, PACK(ALIGNMENT, 1));
+    PUT(p + (2*WSIZE), PACK(ALIGNMENT, 1));
+    PUT(p + (3 * WSIZE), PACK(0, 1));
+    p += (2*WSIZE);
 
     if(extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
     return 0;
 }
 
-static void* extend_heap(size_t words) // 4096 / 4 = 1024
+static void* extend_heap(size_t words)
 {
     char* bp;
     size_t size;
 
-    size = words % 2 ? (words+1) * WSIZE/*홀수*/ : words * WSIZE;/*짝수*/ // size => 1024 * 4 = 4096
+    size = words % 2 ? (words+1) * WSIZE : words * WSIZE;
     if((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
 
     PUT(HDRP(bp), PACK(size, 0));
     PUT(FTRP(bp), PACK(size, 0));
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1));
-    
-    bp = coalesce(bp);
-    push_free_block(bp);
-    return bp;
+
+    return coalesce(bp);
 }
 
+/*
+ * mm_malloc - brk 포인터를 증가시켜 블록을 할당합니다.
+ *     항상 정렬 단위의 배수 크기로 블록을 할당합니다.
+ */
 void *mm_malloc(size_t size)
 {
     size_t asize;
@@ -116,7 +115,7 @@ void *mm_malloc(size_t size)
         return NULL;
 
     if(size <= ALIGNMENT)
-        asize = 3 * ALIGNMENT; // 헤더랑 푸터 포함인건가? ㅇㅇ
+        asize = 2 * ALIGNMENT;
     else
         asize = ALIGNMENT * ((size + ALIGNMENT + ALIGNMENT-1) / ALIGNMENT);
     
@@ -136,14 +135,7 @@ void *mm_malloc(size_t size)
 static void* find_fit(size_t asize)
 {
     void* bp;
-    for(bp = next_fit_p; bp != NULL; bp = NEXT_(bp))
-    {
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
-        {
-            return bp;
-        }
-    }
-    for(bp = list; bp != next_fit_p && bp != NULL; bp = NEXT_(bp))
+    for(bp = p; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp))
     {
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
         {
@@ -156,67 +148,31 @@ static void* find_fit(size_t asize)
 static void place(void* bp, size_t asize)
 {
     size_t csize = GET_SIZE(HDRP(bp));
-    if((csize - asize) >= 3 * ALIGNMENT)
+    if((csize- asize) >= 2*ALIGNMENT)
     {
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        remove_free_block(bp);
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK((csize - asize), 0));
         PUT(FTRP(bp), PACK((csize - asize), 0));
-        push_free_block(bp);
     }
     else
     {
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
-        remove_free_block(bp);
     }
 }
 
-static void remove_free_block(void* bp)
-{
-    if(PREV_(bp)) // prev가 중간이거나 마지막일 때
-    {
-        NEXT_(PREV_(bp)) = NEXT_(bp);
-        if(next_fit_p == bp)
-            next_fit_p = NEXT_(bp);
-    }
-    if(NEXT_(bp)) // next가 중간이거나 처음일 때
-    {
-        PREV_(NEXT_(bp)) = PREV_(bp);
-        if(next_fit_p == bp)
-            next_fit_p = NEXT_(bp);
-    }
-    if(!PREV_(bp)) // bp가 머리일때
-    {
-        list = NEXT_(bp);
-    }
-    
-    PREV_(bp) = NULL;
-    NEXT_(bp) = NULL;
-}
-
-static void push_free_block(void* bp)
-{
-    // 이미 분리가 된 상태로 들어옴
-    PREV_(bp) = NULL;
-    NEXT_(bp) = list;
-    if(list)
-        PREV_(list) = bp;
-    list = bp;
-}
-
+/*
+ * mm_free - 이 구현에서는 블록을 해제할 때 아무 작업도 하지 않습니다.
+ */
 void mm_free(void *ptr)
 {
-    if(!ptr)
-        return;
-
     size_t size = GET_SIZE(HDRP(ptr));
+
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
-    ptr = coalesce(ptr);
-    push_free_block(ptr);
+    coalesce(ptr);
 }
 
 static void* coalesce(void* bp)
@@ -229,16 +185,12 @@ static void* coalesce(void* bp)
         return bp;
     else if(prev_alloc && !next_alloc)
     {
-        remove_free_block(NEXT_BLKP(bp));
-        
         size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
     }
     else if(!prev_alloc && next_alloc)
     {
-        remove_free_block(PREV_BLKP(bp));
-        
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
@@ -246,9 +198,6 @@ static void* coalesce(void* bp)
     }
     else
     {
-        remove_free_block(NEXT_BLKP(bp));
-        remove_free_block(PREV_BLKP(bp));
-        
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
@@ -258,6 +207,9 @@ static void* coalesce(void* bp)
     return bp;
 }
 
+/*
+ * mm_realloc - mm_malloc과 mm_free를 사용하여 단순하게 구현합니다.
+ */
 void *mm_realloc(void *ptr, size_t size)
 {
     void *oldptr = ptr;
