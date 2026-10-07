@@ -1,8 +1,8 @@
 /*
- * mm-explicit.c 명시적 가용 리스트
+ * mm-seg.c 분리 가용 리스트
  *
- * 헤드와 푸터가 존재함.
- * payload내에 prev와 next의 주소가 들어있음.
+ * 크기 구간별로 빈 블록 리스트로 나누기
+ * 
  *
  * 학생 참고 사항: 이 헤더 주석을 여러분의 구현을 개괄적으로 설명하는
  * 주석으로 바꾸세요.
@@ -43,6 +43,7 @@ team_t team = {
 
 #define CHUNKSIZE (1 << 12)
 #define MAX(x, y) (x > y ? x : y)
+#define MIN(x, y) (x < y ? x : y)
 #define PACK(size, alloc) (size|alloc)
 #define GET(p) (*(unsigned int*)(p))
 #define PUT(p, val) (*(unsigned int*)(p) = (val))
@@ -61,15 +62,23 @@ static void place(void* bp, size_t asize);
 static void* coalesce(void* bp);
 static void remove_free_block(void* bp);
 static void push_free_block(void* bp);
+static size_t get_list_idx(size_t asize);
 
 /*
  * mm_init - malloc 구현을 초기화합니다.
  */
 char* p; // 주소(+, *등)를 계산하기 위해 1바이트인 char 사용.
-char* first_fit_p;
-char* list;
+char** seg_free_lists;
+
+#define MAX_FREE_LISTS_COUNT 6
+
 int mm_init(void)
 {
+    seg_free_lists = mem_sbrk(MAX_FREE_LISTS_COUNT * ALIGNMENT);
+    if(seg_free_lists == (void*)-1)
+        return -1;
+    for(size_t i = 0; i < MAX_FREE_LISTS_COUNT; ++i)
+        seg_free_lists[i] = NULL;
     p = mem_sbrk(4 * ALIGNMENT);
     if(p == (void*)-1)
         return -1;
@@ -80,8 +89,6 @@ int mm_init(void)
     PUT(p + ((2 * ALIGNMENT) + (2 * WSIZE)), PACK((3 * ALIGNMENT), 1)); // footer
     PUT(p + ((2 * ALIGNMENT) + (3 * WSIZE)), PACK(0, 0));
     p += (2 * WSIZE); // p => payload
-    list = NULL;
-    first_fit_p = list;
 
     if(extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
@@ -135,22 +142,32 @@ void *mm_malloc(size_t size)
 
 static void* find_fit(size_t asize)
 {
-    void* bp;
-    for(bp = first_fit_p; bp != NULL; bp = NEXT_(bp))
+    size_t startIdx = get_list_idx(asize);
+    for(size_t list_idx = startIdx; list_idx < MAX_FREE_LISTS_COUNT; ++list_idx)
     {
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+        void* bp;
+        for(bp = seg_free_lists[list_idx]; bp != NULL; bp = NEXT_(bp))
         {
-            return bp;
-        }
-    }
-    for(bp = list; bp != first_fit_p && bp != NULL; bp = NEXT_(bp))
-    {
-        if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
-        {
-            return bp;
+            if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
+            {
+                return bp;
+            }
         }
     }
     return NULL;
+}
+
+static size_t get_list_idx(size_t asize)
+{
+    size_t size = CHUNKSIZE / 4;
+    for(int idx = MAX_FREE_LISTS_COUNT - 1; idx >= 0; --idx)
+    {
+        if(size <= asize)
+            return idx;
+        size /= 2;
+    }
+
+    return 0;
 }
 
 static void place(void* bp, size_t asize)
@@ -158,9 +175,9 @@ static void place(void* bp, size_t asize)
     size_t csize = GET_SIZE(HDRP(bp));
     if((csize - asize) >= 3 * ALIGNMENT)
     {
+        remove_free_block(bp);
         PUT(HDRP(bp), PACK(asize, 1));
         PUT(FTRP(bp), PACK(asize, 1));
-        remove_free_block(bp);
         bp = NEXT_BLKP(bp);
         PUT(HDRP(bp), PACK((csize - asize), 0));
         PUT(FTRP(bp), PACK((csize - asize), 0));
@@ -168,9 +185,9 @@ static void place(void* bp, size_t asize)
     }
     else
     {
+        remove_free_block(bp);
         PUT(HDRP(bp), PACK(csize, 1));
         PUT(FTRP(bp), PACK(csize, 1));
-        remove_free_block(bp);
     }
 }
 
@@ -179,18 +196,14 @@ static void remove_free_block(void* bp)
     if(PREV_(bp)) // prev가 중간이거나 마지막일 때
     {
         NEXT_(PREV_(bp)) = NEXT_(bp);
-        if(first_fit_p == bp)
-            first_fit_p = NEXT_(bp);
     }
     if(NEXT_(bp)) // next가 중간이거나 처음일 때
     {
         PREV_(NEXT_(bp)) = PREV_(bp);
-        if(first_fit_p == bp)
-            first_fit_p = NEXT_(bp);
     }
     if(!PREV_(bp)) // bp가 머리일때
     {
-        list = NEXT_(bp);
+        seg_free_lists[get_list_idx(GET_SIZE(HDRP(bp)))] = NEXT_(bp);
     }
     
     PREV_(bp) = NULL;
@@ -201,10 +214,12 @@ static void push_free_block(void* bp)
 {
     // 이미 분리가 된 상태로 들어옴
     PREV_(bp) = NULL;
+    void* list = seg_free_lists[get_list_idx(GET_SIZE(HDRP(bp)))];
     NEXT_(bp) = list;
     if(list)
         PREV_(list) = bp;
     list = bp;
+    seg_free_lists[get_list_idx(GET_SIZE(HDRP(bp)))] = list;
 }
 
 void mm_free(void *ptr)

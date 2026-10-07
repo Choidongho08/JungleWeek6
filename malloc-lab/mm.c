@@ -66,7 +66,7 @@ static void push_free_block(void* bp);
  * mm_init - malloc 구현을 초기화합니다.
  */
 char* p; // 주소(+, *등)를 계산하기 위해 1바이트인 char 사용.
-char* next_fit_p;
+char* first_fit_p;
 char* list;
 int mm_init(void)
 {
@@ -81,7 +81,7 @@ int mm_init(void)
     PUT(p + ((2 * ALIGNMENT) + (3 * WSIZE)), PACK(0, 0));
     p += (2 * WSIZE); // p => payload
     list = NULL;
-    next_fit_p = list;
+    first_fit_p = list;
 
     if(extend_heap(CHUNKSIZE / WSIZE) == NULL)
         return -1;
@@ -136,14 +136,14 @@ void *mm_malloc(size_t size)
 static void* find_fit(size_t asize)
 {
     void* bp;
-    for(bp = next_fit_p; bp != NULL; bp = NEXT_(bp))
+    for(bp = first_fit_p; bp != NULL; bp = NEXT_(bp))
     {
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
         {
             return bp;
         }
     }
-    for(bp = list; bp != next_fit_p && bp != NULL; bp = NEXT_(bp))
+    for(bp = list; bp != first_fit_p && bp != NULL; bp = NEXT_(bp))
     {
         if(!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp))))
         {
@@ -179,14 +179,14 @@ static void remove_free_block(void* bp)
     if(PREV_(bp)) // prev가 중간이거나 마지막일 때
     {
         NEXT_(PREV_(bp)) = NEXT_(bp);
-        if(next_fit_p == bp)
-            next_fit_p = NEXT_(bp);
+        if(first_fit_p == bp)
+            first_fit_p = NEXT_(bp);
     }
     if(NEXT_(bp)) // next가 중간이거나 처음일 때
     {
         PREV_(NEXT_(bp)) = PREV_(bp);
-        if(next_fit_p == bp)
-            next_fit_p = NEXT_(bp);
+        if(first_fit_p == bp)
+            first_fit_p = NEXT_(bp);
     }
     if(!PREV_(bp)) // bp가 머리일때
     {
